@@ -46,6 +46,15 @@ import {
   sheetConfigured,
 } from './sheets.js';
 
+import {
+  speak,
+  transcribe,
+  serveClip,
+  gnaniConfigured,
+  getGnaniCalls,
+  clearGnaniClips,
+} from './gnani.js';
+
 const API_TOKEN = process.env.DELHIVERY_MOCK_TOKEN || 'test-token';
 const ADMIN_KEY = process.env.ADMIN_KEY || 'admin-key';
 const AUTH = `Token ${API_TOKEN}`;
@@ -72,7 +81,7 @@ async function call(fn, args, label) {
   }
 }
 
-function buildServer() {
+function buildServer(publicBaseUrl = "") {
   const server = new McpServer({ name: 'delhivery-mock', version: '1.0.0' });
 
   server.registerTool(
@@ -259,6 +268,65 @@ function buildServer() {
     async ({ tab, values }) => asText(appendRows(tab, values))
   );
 
+  // --- voice: the cook's interface ----------------------------------------
+
+  server.registerTool(
+    'gnani_speak',
+    {
+      title: 'Say something as a voice note',
+      description:
+        'Turn text into speech with Gnani and get back a URL to the audio. ' +
+        'Use this for the cook, who is briefed by voice in Hindi, not by text. ' +
+        'Returns audio_url — send that with the WhatsApp media tool. Keep the ' +
+        'text short and spoken, the way a person would say it out loud.',
+      inputSchema: {
+        text: z.string().describe('What to say, in the target language'),
+        language: z
+          .string()
+          .optional()
+          .describe('BCP-47 code. hi-IN for the cook, en-IN for the family. Default hi-IN'),
+        voice: z
+          .string()
+          .optional()
+          .describe('Nalini, Kaveri or Deepak. Default Nalini'),
+        speed: z
+          .string()
+          .optional()
+          .describe('slow, medium or fast. Default slow — the cook is working while listening'),
+      },
+    },
+    async (a) => ({
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(await speak({ ...a, publicBase: publicBaseUrl }), null, 2),
+        },
+      ],
+    })
+  );
+
+  server.registerTool(
+    'gnani_transcribe',
+    {
+      title: 'Listen to a voice note',
+      description:
+        'Turn a voice note into text with Gnani. Give it the audio_url from ' +
+        'whatsapp_get_inbound_messages. Use it whenever the cook or the family ' +
+        'replies by voice instead of typing — the cook usually will, because her ' +
+        'hands are busy. Audio must be under 60 seconds.',
+      inputSchema: {
+        audio_url: z.string().describe('URL of the voice note'),
+        language_code: z
+          .string()
+          .optional()
+          .describe('BCP-47 code of the speaker. Default hi-IN'),
+      },
+    },
+    async (a) => ({
+      content: [{ type: 'text', text: JSON.stringify(await transcribe(a), null, 2) }],
+    })
+  );
+
   return server;
 }
 
@@ -280,10 +348,13 @@ app.get('/', (_req, res) => {
       'sheet_read',
       'sheet_write',
       'sheet_append',
+      'gnani_speak',
+      'gnani_transcribe',
     ],
     current_scenario: getScenario(),
     scenarios: SCENARIOS,
     sheet_bridge: sheetConfigured() ? 'configured' : 'SHEET_WEBAPP_URL not set',
+    gnani_voice: gnaniConfigured() ? 'configured' : 'GNANI_API_KEY not set',
   });
 });
 
@@ -292,6 +363,7 @@ app.get('/health', (_req, res) =>
     ok: true,
     scenario: getScenario(),
     sheet_bridge: sheetConfigured(),
+    gnani_voice: gnaniConfigured(),
   })
 );
 
@@ -324,6 +396,7 @@ app.post('/admin/reset', requireAdmin, (_req, res) => {
   resetState();
   clearInbound();
   clearSheetCalls();
+  clearGnaniClips();
   res.json({ ok: true, scenario: getScenario() });
 });
 
@@ -342,6 +415,25 @@ app.get('/admin/sheet/read', requireAdmin, async (req, res) => {
 
 app.get('/admin/sheet/calls', requireAdmin, (_req, res) =>
   res.json({ count: getSheetCalls().length, calls: getSheetCalls() })
+);
+
+// --- voice ----------------------------------------------------------------
+// Generated clips are served unauthenticated so WhatsApp can fetch them.
+
+app.get('/audio/:id', serveClip);
+
+app.get('/admin/gnani/calls', requireAdmin, (_req, res) =>
+  res.json({ count: getGnaniCalls().length, calls: getGnaniCalls() })
+);
+
+app.get('/admin/gnani/test', requireAdmin, async (req, res) =>
+  res.json(
+    await speak({
+      text: String(req.query.text || 'Aaj dal, bhindi aur roti banani hai.'),
+      language: String(req.query.language || 'hi-IN'),
+      publicBase: publicBase(req),
+    })
+  )
 );
 
 // --- whatsapp inbound ------------------------------------------------------
@@ -373,7 +465,7 @@ app.post('/admin/inbound', requireAdmin, (req, res) => {
 // --- mcp endpoint (stateless: one server+transport per request) -------------
 
 app.post('/mcp', async (req, res) => {
-  const server = buildServer();
+  const server = buildServer(publicBase(req));
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined, // stateless
     enableJsonResponse: true,
