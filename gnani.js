@@ -52,6 +52,26 @@ function withTimeout() {
   return { signal: controller.signal, done: () => clearTimeout(timer) };
 }
 
+/**
+ * Gnani's docs list "slow" / "medium" / "fast" as accepted speeds, but the
+ * live API rejects them: `Input should be a valid number ... at body -> speed`.
+ * Map them to the numbers the docs give for each, and clamp to the documented
+ * 0.85-1.15 range.
+ */
+const SPEED_WORDS = { slow: 0.85, medium: 1.0, normal: 1.0, fast: 1.15 };
+
+function toSpeed(v) {
+  if (typeof v === 'number' && Number.isFinite(v)) return clampSpeed(v);
+  const word = String(v ?? '').trim().toLowerCase();
+  if (word in SPEED_WORDS) return SPEED_WORDS[word];
+  const n = Number(word);
+  return Number.isFinite(n) && word !== '' ? clampSpeed(n) : 0.85;
+}
+
+function clampSpeed(n) {
+  return Math.min(1.15, Math.max(0.85, n));
+}
+
 const NO_KEY = {
   ok: false,
   error:
@@ -70,6 +90,7 @@ export async function speak({
   speed = 'slow',
   publicBase = '',
 }) {
+  const speedValue = toSpeed(speed);
   if (!API_KEY) return NO_KEY;
 
   const started = Date.now();
@@ -87,7 +108,7 @@ export async function speak({
         model: 'timbre-v2.5',
         voice,
         language,
-        speed,
+        speed: speedValue,
         audio_config: {
           sample_rate: 48000,
           num_channels: 1,
@@ -114,13 +135,22 @@ export async function speak({
     clips.set(id, { buffer, mime: res.headers.get('content-type') || 'audio/wav' });
     if (clips.size > 50) clips.delete(clips.keys().next().value);
 
-    log({ tool: 'speak', ok: true, language, voice, bytes: buffer.length, ms: Date.now() - started });
+    log({
+      tool: 'speak',
+      ok: true,
+      language,
+      voice,
+      speed: speedValue,
+      bytes: buffer.length,
+      ms: Date.now() - started,
+    });
 
     return {
       ok: true,
       audio_url: `${publicBase}/audio/${id}.wav`,
       language,
       voice,
+      speed: speedValue,
       bytes: buffer.length,
       spoken_text: text,
     };
