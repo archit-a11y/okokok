@@ -1,0 +1,135 @@
+/**
+ * Bhojan — Google Sheet bridge.
+ *
+ * Paste this into the sheet's own Apps Script editor and deploy it as a Web
+ * app ("Execute as: Me", "Who has access: Anyone"). Apps Script then runs it
+ * with YOUR Google account's permission on THIS sheet only — which is why the
+ * agent needs no OAuth of its own.
+ *
+ * Everything is a GET. Apps Script web apps answer with a 302 to
+ * googleusercontent.com, and a redirected POST loses its body (fetch turns it
+ * into a GET), so POST is not usable from a server. GET survives the redirect.
+ *
+ * Actions:
+ *   ?action=tabs
+ *   ?action=read&range=pantry!A1:F20
+ *   ?action=write&range=rules!B3&values=[[2000]]
+ *   ?action=append&tab=history&values=[["2026-10-04","Dal + bhindi",2810,86,40,"yes"]]
+ *
+ * Every call must carry &secret=<SECRET>.
+ */
+
+var SECRET = 'bhojan-2026';
+
+function doGet(e) {
+  return handle(e.parameter || {});
+}
+
+function doPost(e) {
+  var p = e.parameter || {};
+  try {
+    if (e.postData && e.postData.contents) {
+      var body = JSON.parse(e.postData.contents);
+      for (var k in body) p[k] = body[k];
+    }
+  } catch (err) { /* fall back to query params */ }
+  return handle(p);
+}
+
+function handle(p) {
+  if (p.secret !== SECRET) {
+    return out({ ok: false, error: 'bad secret' });
+  }
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  try {
+    switch (p.action) {
+
+      case 'tabs':
+        return out({
+          ok: true,
+          tabs: ss.getSheets().map(function (s) { return s.getName(); })
+        });
+
+      case 'read': {
+        if (!p.range) return out({ ok: false, error: 'range is required' });
+        var rng = ss.getRange(p.range);
+        return out({
+          ok: true,
+          range: p.range,
+          values: rng.getDisplayValues()
+        });
+      }
+
+      case 'write': {
+        if (!p.range) return out({ ok: false, error: 'range is required' });
+        var vals = parseValues(p.values);
+        if (!vals) return out({ ok: false, error: 'values must be a 2D JSON array' });
+
+        var anchor = ss.getRange(p.range);
+        var sheet = anchor.getSheet();
+        var target = sheet.getRange(
+          anchor.getRow(),
+          anchor.getColumn(),
+          vals.length,
+          vals[0].length
+        );
+        target.setValues(vals);
+        SpreadsheetApp.flush();
+        return out({
+          ok: true,
+          wrote: target.getA1Notation(),
+          tab: sheet.getName(),
+          cells: vals.length * vals[0].length
+        });
+      }
+
+      case 'append': {
+        if (!p.tab) return out({ ok: false, error: 'tab is required' });
+        var vals2 = parseValues(p.values);
+        if (!vals2) return out({ ok: false, error: 'values must be a 2D JSON array' });
+
+        var sh = ss.getSheetByName(p.tab);
+        if (!sh) return out({ ok: false, error: 'no such tab: ' + p.tab });
+
+        var startRow = sh.getLastRow() + 1;
+        sh.getRange(startRow, 1, vals2.length, vals2[0].length).setValues(vals2);
+        SpreadsheetApp.flush();
+        return out({
+          ok: true,
+          tab: p.tab,
+          appended_rows: vals2.length,
+          first_row: startRow
+        });
+      }
+
+      default:
+        return out({
+          ok: false,
+          error: 'unknown action',
+          actions: ['tabs', 'read', 'write', 'append']
+        });
+    }
+  } catch (err) {
+    return out({ ok: false, error: String(err) });
+  }
+}
+
+/** Accepts a JSON string or an already-parsed array. Always returns 2D or null. */
+function parseValues(v) {
+  if (v === undefined || v === null) return null;
+  var arr = v;
+  if (typeof v === 'string') {
+    try { arr = JSON.parse(v); } catch (e) { return null; }
+  }
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  if (!Array.isArray(arr[0])) arr = [arr];          // one flat row is fine
+  return arr;
+}
+
+function out(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
