@@ -226,7 +226,34 @@ export async function readRange(range) {
  * Overwrite starting at an anchor cell. `range` may be a single cell
  * ("pantry!B3") — the block is sized from the values given.
  */
+/**
+ * Row 1 of every tab is its header. An agent that writes there destroys the
+ * column names the whole system reads by, and one did try: it aimed
+ * "pantry!A1:F20" at five invented items taken from dish names. A tool that
+ * can wipe its own schema is a tool with too much reach, so this refuses.
+ */
+function guardAnchor(range) {
+  const { tab, a1 } = splitRange(range);
+  const m = /^([A-Za-z]+)(\d+)/.exec(String(a1 || '').trim());
+  if (!m) return null;
+  if (Number(m[2]) <= 1) {
+    return {
+      ok: false,
+      error:
+        `Refused: ${range} starts at row 1, which is the header row of the ` +
+        `${tab} tab. Write to the row of the item you mean — read the tab first ` +
+        `and target that cell, e.g. "pantry!B6" for tomato.`,
+    };
+  }
+  return null;
+}
+
 export async function writeRange(range, values) {
+  const blocked = guardAnchor(range);
+  if (blocked) {
+    calls.push({ at: new Date().toISOString(), action: 'write_refused', range, ok: false });
+    return blocked;
+  }
   const { tab } = splitRange(range);
   const res = await callScript({ action: 'write', range, values });
   invalidateSheetCache(tab);   // never serve a stale value we just overwrote

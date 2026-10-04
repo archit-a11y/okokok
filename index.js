@@ -207,9 +207,15 @@ function buildServer(publicBaseUrl = "") {
 
   // --- the household sheet: the agent's only memory ------------------------
 
+  // The platform's MCP client coerces every argument to a string and rejects
+  // numbers, booleans and nulls inside an array schema. So values arrive as a
+  // JSON string and the server parses them.
   const cellValues = z
-    .array(z.array(z.union([z.string(), z.number(), z.boolean()])))
-    .describe('Rows of cells, outermost array is rows: [["tomato", 1, "kg"]]');
+    .string()
+    .describe(
+      'Rows of cells as a JSON string, outermost array is rows. ' +
+      'Example: [["tomato","0","pcs"]]. Quote every value.'
+    );
 
   const asText = async (promise) => ({
     content: [{ type: 'text', text: JSON.stringify(await promise, null, 2) }],
