@@ -17,6 +17,24 @@ const WEBAPP_URL = process.env.SHEET_WEBAPP_URL || '';
 const SECRET = process.env.SHEET_SECRET || 'bhojan-2026';
 const TIMEOUT_MS = Number(process.env.SHEET_TIMEOUT_MS || 20000);
 
+/**
+ * AgenticOrg fixes its connector timeout at 10 seconds and does not expose it.
+ * A single Apps Script round trip is 2-5s cold, and one planning turn reads
+ * six tabs, so the agent was timing out before it finished reading.
+ *
+ * So the first read of a turn pulls EVERY tab at once, in parallel, and caches
+ * the lot. The other five reads are then served from memory in under a
+ * millisecond. A write clears the cache, so the agent never reads back a value
+ * it has just changed.
+ */
+const CACHE_MS = Number(process.env.SHEET_CACHE_MS || 45000);
+const TABS = [
+  'people', 'pantry', 'goals', 'health',
+  'recipes', 'dishes', 'history', 'rules', 'usage',
+];
+const cache = new Map();          // tab -> { values, at }
+let warming = null;               // in-flight warm, so we fan out only once
+
 const calls = [];
 
 export function getSheetCalls() {
@@ -109,8 +127,98 @@ export function listTabs() {
   return callScript({ action: 'tabs' });
 }
 
-/** Read a range, e.g. "pantry!A1:F20". Returns displayed strings. */
-export function readRange(range) {
+/** Split "pantry!A1:F20" into its tab and the A1 part. */
+function splitRange(range) {
+  const i = String(range).lastIndexOf('!');
+  if (i === -1) return { tab: String(range), a1: null };
+  return { tab: String(range).slice(0, i).replace(/^'|'$/g, ''), a1: String(range).slice(i + 1) };
+}
+
+/** Column letters -> 1-based index. A=1, Z=26, AA=27. */
+function colToNum(letters) {
+  let n = 0;
+  for (const ch of letters.toUpperCase()) n = n * 26 + (ch.charCodeAt(0) - 64);
+  return n;
+}
+
+/** Cut a cached full-tab grid down to the A1 range the caller asked for. */
+function slice(values, a1) {
+  if (!a1) return values;
+  const m = /^([A-Za-z]+)(\d+):([A-Za-z]+)(\d+)$/.exec(a1.trim());
+  if (!m) return values;
+  const [, c1, r1, c2, r2] = m;
+  const rowStart = Math.max(1, Number(r1)) - 1;
+  const rowEnd = Number(r2);
+  const colStart = Math.max(1, colToNum(c1)) - 1;
+  const colEnd = colToNum(c2);
+  return values.slice(rowStart, rowEnd).map((row) => row.slice(colStart, colEnd));
+}
+
+function fresh(tab) {
+  const hit = cache.get(tab);
+  return hit && Date.now() - hit.at < CACHE_MS ? hit : null;
+}
+
+/** Pull every tab at once. One fan-out, not nine sequential round trips. */
+async function warmAll() {
+  if (warming) return warming;
+  warming = (async () => {
+    const started = Date.now();
+    const results = await Promise.all(
+      TABS.map(async (tab) => {
+        const body = await callScript({ action: 'read', range: `${tab}!A1:Z200` });
+        return [tab, body];
+      })
+    );
+    let ok = 0;
+    for (const [tab, body] of results) {
+      if (body && body.ok !== false && Array.isArray(body.values)) {
+        cache.set(tab, { values: body.values, at: Date.now() });
+        ok += 1;
+      }
+    }
+    calls.push({
+      at: new Date().toISOString(),
+      action: 'warm_all',
+      range: `${ok}/${TABS.length} tabs`,
+      ms: Date.now() - started,
+      ok: ok > 0,
+    });
+    warming = null;
+    return ok;
+  })();
+  return warming;
+}
+
+export function invalidateSheetCache(tab) {
+  if (tab) cache.delete(tab);
+  else cache.clear();
+}
+
+export function cacheState() {
+  return Object.fromEntries(
+    [...cache.entries()].map(([t, v]) => [t, { rows: v.values.length, age_ms: Date.now() - v.at }])
+  );
+}
+
+/**
+ * Read a range, e.g. "pantry!A1:F20". Returns displayed strings.
+ * Served from the warm cache when possible; the first miss warms every tab.
+ */
+export async function readRange(range) {
+  const { tab, a1 } = splitRange(range);
+
+  let hit = fresh(tab);
+  if (!hit) {
+    await warmAll();
+    hit = fresh(tab);
+  }
+
+  if (hit) {
+    return { ok: true, range, cached: true, values: slice(hit.values, a1) };
+  }
+
+  // Tab is not one we warm (or the warm failed) — go direct.
   return callScript({ action: 'read', range });
 }
 
@@ -118,11 +226,16 @@ export function readRange(range) {
  * Overwrite starting at an anchor cell. `range` may be a single cell
  * ("pantry!B3") — the block is sized from the values given.
  */
-export function writeRange(range, values) {
-  return callScript({ action: 'write', range, values });
+export async function writeRange(range, values) {
+  const { tab } = splitRange(range);
+  const res = await callScript({ action: 'write', range, values });
+  invalidateSheetCache(tab);   // never serve a stale value we just overwrote
+  return res;
 }
 
 /** Add rows to the bottom of a tab. */
-export function appendRows(tab, values) {
-  return callScript({ action: 'append', tab, values });
+export async function appendRows(tab, values) {
+  const res = await callScript({ action: 'append', tab, values });
+  invalidateSheetCache(tab);
+  return res;
 }
