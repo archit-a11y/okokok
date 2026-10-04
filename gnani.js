@@ -35,7 +35,7 @@ export function clearGnaniClips() {
 }
 
 export function serveClip(req, res) {
-  const id = String(req.params.id || '').replace(/\.wav$/, '');
+  const id = String(req.params.id || '').replace(/\.(wav|ogg|mp3)$/i, '');
   const clip = clips.get(id);
   if (!clip) return res.sendStatus(404);
   res.set('Content-Type', clip.mime).send(clip.buffer);
@@ -83,6 +83,12 @@ const NO_KEY = {
  * Text -> speech. Returns a URL the agent can send as a WhatsApp voice note.
  * Defaults are tuned for the cook: Hindi, a female voice, slightly slow.
  */
+/**
+ * WhatsApp accepts aac, mp4, amr, mpeg and ogg-with-opus. It does NOT accept
+ * wav: the send returns 200 and then nothing is ever delivered. Opus in an ogg
+ * container is also what makes it render as a voice note with a waveform
+ * rather than a file attachment, which is the point for the cook.
+ */
 export async function speak({
   text,
   language = 'hi-IN',
@@ -113,8 +119,8 @@ export async function speak({
           sample_rate: 48000,
           num_channels: 1,
           sample_width: 2,
-          encoding: 'linear_pcm',
-          container: 'wav',
+          encoding: 'oggopus',
+          container: 'ogg',
         },
       }),
       signal: t.signal,
@@ -132,7 +138,10 @@ export async function speak({
 
     const buffer = Buffer.from(await res.arrayBuffer());
     const id = `tts-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    clips.set(id, { buffer, mime: res.headers.get('content-type') || 'audio/wav' });
+    // Force the mime WhatsApp expects; Gnani sometimes answers octet-stream.
+    const served = res.headers.get('content-type');
+    const mime = served && /ogg/i.test(served) ? served : 'audio/ogg; codecs=opus';
+    clips.set(id, { buffer, mime });
     if (clips.size > 50) clips.delete(clips.keys().next().value);
 
     log({
@@ -147,7 +156,7 @@ export async function speak({
 
     return {
       ok: true,
-      audio_url: `${publicBase}/audio/${id}.wav`,
+      audio_url: `${publicBase}/audio/${id}.ogg`,
       language,
       voice,
       speed: speedValue,
