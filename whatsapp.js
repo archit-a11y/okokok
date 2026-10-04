@@ -149,3 +149,96 @@ export function injectInbound({ from, name, text, type = 'text' }) {
   inbox.push(record);
   return record;
 }
+
+// --------------------------------------------------------------------------
+// Outbound.
+//
+// AgenticOrg's native WhatsApp connector only sends, and registering it means
+// fighting the native-connector name check. Since this server already receives
+// inbound messages, it sends from here too — one connector for the whole
+// channel.
+//
+// Needs WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID.
+// --------------------------------------------------------------------------
+
+const PHONE_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || '';
+const outboundLog = [];
+
+export function whatsappConfigured() {
+  return Boolean(WA_TOKEN && PHONE_ID);
+}
+
+export function getOutboundLog() {
+  return outboundLog;
+}
+
+function logOut(entry) {
+  outboundLog.push({ at: new Date().toISOString(), ...entry });
+  if (outboundLog.length > 200) outboundLog.shift();
+}
+
+const NOT_SET = {
+  ok: false,
+  error:
+    'WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID are not set. Add them in ' +
+    'Render → Environment from the Meta app dashboard (WhatsApp → API Setup).',
+};
+
+async function send(payload, label) {
+  if (!whatsappConfigured()) return NOT_SET;
+
+  const started = Date.now();
+  try {
+    const res = await fetch(`${GRAPH}/${PHONE_ID}/messages`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${WA_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ messaging_product: 'whatsapp', ...payload }),
+    });
+
+    const body = await res.json().catch(() => ({}));
+    logOut({ label, to: payload.to, ok: res.ok, status: res.status, ms: Date.now() - started });
+
+    if (!res.ok) {
+      const meta = body?.error || {};
+      // 131047 / 131026: outside the 24-hour customer-service window.
+      const windowClosed = [131047, 131026].includes(meta.code);
+      return {
+        ok: false,
+        http_status: res.status,
+        error: meta.message || body,
+        hint: windowClosed
+          ? 'WhatsApp only allows a free-form message within 24 hours of the ' +
+            'person last messaging your number. Ask them to send anything first, ' +
+            'or use an approved template.'
+          : undefined,
+      };
+    }
+
+    return { ok: true, message_id: body?.messages?.[0]?.id || null, to: payload.to };
+  } catch (err) {
+    logOut({ label, to: payload.to, ok: false, error: String(err.message) });
+    return { ok: false, error: String(err.message) };
+  }
+}
+
+/** A plain text message. Used for the family. */
+export function sendText({ to, text }) {
+  return send(
+    { to: String(to).replace(/\D/g, ''), type: 'text', text: { body: text, preview_url: false } },
+    'text'
+  );
+}
+
+/**
+ * A voice note, from a URL — give it the audio_url that gnani_speak returned.
+ * Used for the cook, who is briefed by voice.
+ */
+export function sendVoice({ to, audio_url }) {
+  return send(
+    { to: String(to).replace(/\D/g, ''), type: 'audio', audio: { link: audio_url } },
+    'voice'
+  );
+}

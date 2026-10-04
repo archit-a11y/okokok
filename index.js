@@ -34,6 +34,10 @@ import {
   clearInbound,
   inboxSize,
   injectInbound,
+  sendText,
+  sendVoice,
+  whatsappConfigured,
+  getOutboundLog,
 } from './whatsapp.js';
 
 import {
@@ -327,6 +331,45 @@ function buildServer(publicBaseUrl = "") {
     })
   );
 
+  // --- whatsapp outbound ---------------------------------------------------
+
+  server.registerTool(
+    'whatsapp_send_text',
+    {
+      title: 'Send a WhatsApp text',
+      description:
+        'Send a text message on WhatsApp. Use it for the family — menu, cost, ' +
+        'budget left, anything needing a yes. Do not send money or nutrition ' +
+        'numbers to the cook. Give the number as digits with country code, e.g. ' +
+        '919800000001; the people tab has them.',
+      inputSchema: {
+        to: z.string().describe('Phone number, digits only with country code'),
+        text: z.string().describe('The message'),
+      },
+    },
+    async (a) => ({
+      content: [{ type: 'text', text: JSON.stringify(await sendText(a), null, 2) }],
+    })
+  );
+
+  server.registerTool(
+    'whatsapp_send_voice',
+    {
+      title: 'Send a WhatsApp voice note',
+      description:
+        'Send a voice note. Pass the audio_url that gnani_speak returned. This ' +
+        'is how the cook is briefed — she is working and cannot read a long ' +
+        'message. Call gnani_speak first, then this with its audio_url.',
+      inputSchema: {
+        to: z.string().describe('Phone number, digits only with country code'),
+        audio_url: z.string().describe('audio_url from gnani_speak'),
+      },
+    },
+    async (a) => ({
+      content: [{ type: 'text', text: JSON.stringify(await sendVoice(a), null, 2) }],
+    })
+  );
+
   return server;
 }
 
@@ -350,11 +393,16 @@ app.get('/', (_req, res) => {
       'sheet_append',
       'gnani_speak',
       'gnani_transcribe',
+      'whatsapp_send_text',
+      'whatsapp_send_voice',
     ],
     current_scenario: getScenario(),
     scenarios: SCENARIOS,
     sheet_bridge: sheetConfigured() ? 'configured' : 'SHEET_WEBAPP_URL not set',
     gnani_voice: gnaniConfigured() ? 'configured' : 'GNANI_API_KEY not set',
+    whatsapp_outbound: whatsappConfigured()
+      ? 'configured'
+      : 'WHATSAPP_TOKEN / WHATSAPP_PHONE_NUMBER_ID not set',
   });
 });
 
@@ -364,6 +412,7 @@ app.get('/health', (_req, res) =>
     scenario: getScenario(),
     sheet_bridge: sheetConfigured(),
     gnani_voice: gnaniConfigured(),
+    whatsapp_outbound: whatsappConfigured(),
   })
 );
 
@@ -421,6 +470,10 @@ app.get('/admin/sheet/calls', requireAdmin, (_req, res) =>
 // Generated clips are served unauthenticated so WhatsApp can fetch them.
 
 app.get('/audio/:id', serveClip);
+
+app.get('/admin/whatsapp/sent', requireAdmin, (_req, res) =>
+  res.json({ count: getOutboundLog().length, sent: getOutboundLog() })
+);
 
 app.get('/admin/gnani/calls', requireAdmin, (_req, res) =>
   res.json({ count: getGnaniCalls().length, calls: getGnaniCalls() })
